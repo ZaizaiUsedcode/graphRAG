@@ -1,0 +1,25 @@
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: my-agent-lab-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/neo4j-local-password}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q --spider http://localhost:7474 || exit 1"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
