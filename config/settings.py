@@ -22,4 +22,13 @@ class Config:
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j-local-password")
     NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
+    # 社区检测配置
+    COMMUNITY_RESOLUTION = 1.0
+    COMMUNITY_MAX_LEVELS = 3
+    COMMUNITY_MIN_SIZE = 2
+
+    # Global Search配置
+    GLOBAL_MIN_RELEVANCE = 3
+    GLOBAL_MAX_COMMUNITIES = 10
+
 config = Config()

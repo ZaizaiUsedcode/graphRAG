@@ -24,6 +24,8 @@ class Neo4jStore:
             "FOR (c:Chunk) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT document_name IF NOT EXISTS "
             "FOR (d:Document) REQUIRE d.name IS UNIQUE",
+            "CREATE CONSTRAINT community_id IF NOT EXISTS "
+            "FOR (c:Community) REQUIRE c.id IS UNIQUE",
         )
         with self.driver.session(database=self.database) as session:
             for statement in statements:
@@ -85,7 +87,7 @@ class Neo4jStore:
         entities = [
             {
                 "name": entity.get("name"),
-                "type": entity.get("type", "未知"),
+                "type": entity.get("type", "Unknown"),
                 "description": entity.get("description", ""),
             }
             for entity in data.get("entities", [])
@@ -95,8 +97,9 @@ class Neo4jStore:
             {
                 "source": rel.get("source"),
                 "target": rel.get("target"),
-                "type": rel.get("relation", "相关"),
+                "type": rel.get("relation", "related_to"),
                 "description": rel.get("description", ""),
+                "strength": rel.get("strength", 5),
             }
             for rel in data.get("relationships", [])
             if rel.get("source") and rel.get("target")
@@ -145,6 +148,7 @@ class Neo4jStore:
                           description: $description
                         }}]->(target)
                         SET r.business_type = $business_type,
+                            r.strength = $strength,
                             r.updated_at = datetime(),
                             r.chunk_ids = CASE
                               WHEN c.id IN coalesce(r.chunk_ids, [])
@@ -157,6 +161,7 @@ class Neo4jStore:
                         target=item["target"],
                         description=item["description"],
                         business_type=item["type"],
+                        strength=item["strength"],
                     ).consume()
 
             session.execute_write(persist)
@@ -254,3 +259,116 @@ class Neo4jStore:
             "mentions": mentions,
             "relationships": relationships,
         }
+
+    def save_community(self, community_id, level, entity_names, summary=None,
+                       entity_count=0, relationship_count=0):
+        """Save a single community node and link entities to it."""
+        with self.driver.session(database=self.database) as session:
+            def persist(tx):
+                tx.run(
+                    """
+                    MERGE (c:Community {id: $community_id})
+                    SET c.level = $level,
+                        c.summary = $summary,
+                        c.entity_count = $entity_count,
+                        c.relationship_count = $relationship_count,
+                        c.updated_at = datetime()
+                    """,
+                    community_id=community_id,
+                    level=level,
+                    summary=summary,
+                    entity_count=entity_count,
+                    relationship_count=relationship_count,
+                ).consume()
+                for entity_name in entity_names:
+                    tx.run(
+                        """
+                        MATCH (e:Entity {name: $entity_name})
+                        MATCH (c:Community {id: $community_id})
+                        MERGE (e)-[:BELONGS_TO]->(c)
+                        """,
+                        entity_name=entity_name,
+                        community_id=community_id,
+                    ).consume()
+            session.execute_write(persist)
+
+    def save_communities_batch(self, communities):
+        """Save multiple communities at once.
+
+        Args:
+            communities: List of dicts with keys:
+                id, level, entities, summary, entity_count, relationship_count
+        """
+        for comm in communities:
+            self.save_community(
+                community_id=comm["id"],
+                level=comm["level"],
+                entity_names=comm["entities"],
+                summary=comm.get("summary"),
+                entity_count=comm.get("entity_count", len(comm["entities"])),
+                relationship_count=comm.get("relationship_count", 0),
+            )
+
+    def load_communities(self):
+        """Load all communities and their entity memberships from Neo4j."""
+        with self.driver.session(database=self.database) as session:
+            communities = [
+                dict(record)
+                for record in session.run(
+                    """
+                    MATCH (c:Community)
+                    RETURN c.id AS id, c.level AS level, c.summary AS summary,
+                           c.entity_count AS entity_count,
+                           c.relationship_count AS relationship_count
+                    ORDER BY c.level, c.id
+                    """
+                )
+            ]
+            memberships = [
+                dict(record)
+                for record in session.run(
+                    """
+                    MATCH (e:Entity)-[:BELONGS_TO]->(c:Community)
+                    RETURN e.name AS entity, c.id AS community_id
+                    """
+                )
+            ]
+        community_entities = {}
+        for m in memberships:
+            community_entities.setdefault(m["community_id"], set()).add(m["entity"])
+        for comm in communities:
+            comm["entities"] = community_entities.get(comm["id"], set())
+        return communities
+
+    def has_communities(self, level=None):
+        """Check if communities exist at a given level (or any level if None)."""
+        with self.driver.session(database=self.database) as session:
+            if level is not None:
+                record = session.run(
+                    "MATCH (c:Community {level: $level}) RETURN count(c) > 0 AS exists",
+                    level=level,
+                ).single()
+            else:
+                record = session.run(
+                    "MATCH (c:Community) RETURN count(c) > 0 AS exists"
+                ).single()
+        return bool(record and record["exists"])
+
+    def delete_communities(self, level=None):
+        """Delete communities and their BELONGS_TO relationships."""
+        with self.driver.session(database=self.database) as session:
+            if level is not None:
+                session.run(
+                    """
+                    MATCH (c:Community {level: $level})
+                    DETACH DELETE c
+                    """,
+                    level=level,
+                ).consume()
+            else:
+                session.run(
+                    """
+                    MATCH (c:Community)
+                    DETACH DELETE c
+                    """
+                ).consume()
